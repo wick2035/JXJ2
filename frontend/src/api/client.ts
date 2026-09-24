@@ -3,7 +3,7 @@ import { message } from 'antd';
 import { useAuthStore } from '../store/authStore';
 
 const client = axios.create({
-  baseURL: 'http://localhost:8081',
+  baseURL: '/',
   timeout: 30000,
 });
 

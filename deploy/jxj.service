@@ -1,0 +1,17 @@
+[Unit]
+Description=JXJ2 backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www
+Group=www
+WorkingDirectory=/www/wwwroot/jxj
+EnvironmentFile=/etc/jxj/jxj.env
+ExecStart=/usr/bin/java -jar /www/wwwroot/jxj/jxj-1.0.0.jar
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
