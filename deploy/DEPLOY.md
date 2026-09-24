@@ -1,62 +1,22 @@
-# JXJ2 上传与部署
-
-部署地址：`http://47.96.253.93:5858`。Nginx 在 `5858` 提供前端，并将 `/api/` 转发到仅监听本机 `8082` 的后端。
-
-## 上传文件
-
-将压缩包解压到 `/www/wwwroot/jxj`，目录结构应为：
-
-```text
-/www/wwwroot/jxj/
-├── jxj-1.0.0.jar
-├── dist/
-│   ├── index.html
-│   └── assets/
-├── nginx-jxj-5858.conf
-├── jxj.service
-├── jxj.env.example
-└── DEPLOY.md
-```
-
-前端构建已使用同源 `/api`，无需再修改接口地址。部署包内不含数据库密码和 JWT 密钥。
-
-## 后端
-
-服务器需要 Java 11 或更高版本，以及现有的 `eval_system` 数据库。按服务器的实际 Java 路径和运行用户调整 `jxj.service`，并确保该用户可以写入 uploads 目录。
-
-```bash
-mkdir -p /www/wwwroot/jxj/uploads /etc/jxj
-cp /www/wwwroot/jxj/jxj.env.example /etc/jxj/jxj.env
-chmod 600 /etc/jxj/jxj.env
-```
-
-编辑 `/etc/jxj/jxj.env`，填写 `DB_PASSWORD` 和足够长的随机 `JWT_SIGNING_KEY`。该文件不要放在网站根目录，也不要提交到 Git。之后安装服务：
-
-```bash
-cp /www/wwwroot/jxj/jxj.service /etc/systemd/system/jxj.service
-systemctl daemon-reload
-systemctl enable --now jxj
-systemctl status jxj
-```
-
-如果使用宝塔 Java 项目管理器，可直接指定 jar 路径并设置 `jxj.env.example` 所列环境变量，无需安装 systemd 服务。
+# JXJ2 宝塔项目配置
 
 ## 前端
 
-将 `nginx-jxj-5858.conf` 作为 Nginx 站点配置，或将其中的 `server` 块加入宝塔的 Nginx 配置。检查后重载：
+前端静态文件已放在 `/www/wwwroot/JXJ2/frontend/dist`。这是 React/Vite 构建产物，宝塔中应选择 **HTML项目**，将网站根目录设为该 `dist` 目录，监听端口设为 `5858`。无需为静态文件选择可执行文件或填写执行命令。
 
-```bash
-nginx -t
-systemctl reload nginx
-```
+在站点的 Nginx 配置中，将 `/api/` 转发到 `http://127.0.0.1:8082`，并让前端路由回退到 `index.html`。本目录的 `nginx-jxj-5858.conf` 提供了可参考的完整 `server` 块。保存配置后运行 `nginx -t`，再重载 Nginx。
 
-在服务器防火墙和云安全组开放 TCP `5858`。后端 `8082` 只监听 `127.0.0.1`，无需对公网开放。
-
-## 检查
+服务器防火墙和云安全组需要放行 TCP `5858`。站点启用后检查：
 
 ```bash
 curl -I http://127.0.0.1:5858/
 curl -I http://127.0.0.1:5858/api/categories
 ```
 
-第二条请求可能返回鉴权错误，但不应返回前端的 `index.html`。然后访问 `http://47.96.253.93:5858` 并测试登录。
+第二条请求未登录时可能返回 401，这是后端的鉴权响应。
+
+## 后端
+
+当前后端 jar 位于 `/www/wwwroot/JXJ2/backend/jxj-1.0.0.jar`，由宝塔 Java 项目 `spring_jxj-1` 管理，端口为 `8082`。数据库连接和 JWT 密钥应在宝塔的 **Java项目** 设置中配置。宝塔重启项目时会重写 `/var/tmp/springboot/vhost/env/jxj-1.env`，不要只手动编辑该文件。
+
+当前 jar 可使用的环境变量：`SPRING_DATASOURCE_URL`、`SPRING_DATASOURCE_USERNAME`、`SPRING_DATASOURCE_PASSWORD`、`JWT_SECRET`、`UPLOAD_PATH`。数据库密码和 JWT 密钥不要放进前端文件或 Git。`jxj.service` 是独立 systemd 部署的备选模板，当前服务器无需安装。

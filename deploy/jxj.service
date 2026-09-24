@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=www
 Group=www
-WorkingDirectory=/www/wwwroot/jxj
+WorkingDirectory=/www/wwwroot/JXJ2/backend
 EnvironmentFile=/etc/jxj/jxj.env
-ExecStart=/usr/bin/java -jar /www/wwwroot/jxj/jxj-1.0.0.jar
+ExecStart=/usr/bin/java -jar /www/wwwroot/JXJ2/backend/jxj-1.0.0.jar
 Restart=on-failure
 RestartSec=5
 
