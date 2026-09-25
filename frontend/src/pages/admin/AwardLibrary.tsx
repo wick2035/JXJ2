@@ -39,6 +39,9 @@ type ScoreMatrixItem = {
   custom: boolean;
 };
 
+let temporaryLevelRowNumber = 0;
+const temporaryLevelRowKey = () => `new-level-${++temporaryLevelRowNumber}`;
+
 const presetRows = (levels: AwardLevelDef[], award?: AwardVO): ScoreMatrixItem[] =>
   levels.map((level) => ({
     key: level.id,
@@ -51,7 +54,7 @@ const customRows = (award: AwardVO, levels: AwardLevelDef[], clone: boolean): Sc
   award.levelScores
     .filter((score) => !levels.some((level) => level.id === score.levelId))
     .map((score) => ({
-      key: clone ? crypto.randomUUID() : score.levelId,
+      key: clone ? temporaryLevelRowKey() : score.levelId,
       levelId: clone ? undefined : score.levelId,
       levelName: score.levelName,
       baseScore: score.baseScore,
@@ -466,7 +469,7 @@ const AwardLibrary: React.FC = () => {
                 />
                 <Button icon={<PlusOutlined />} onClick={() => setScoreMatrix((prev) => [
                   ...prev,
-                  { key: crypto.randomUUID(), levelName: '', baseScore: 0, custom: true },
+                  { key: temporaryLevelRowKey(), levelName: '', baseScore: 0, custom: true },
                 ])}>
                   添加自定义级别
                 </Button>
