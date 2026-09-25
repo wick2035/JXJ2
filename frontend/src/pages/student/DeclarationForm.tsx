@@ -590,7 +590,7 @@ const DeclarationForm: React.FC = () => {
               }));
               const levelOptions = (award?.levelScores || []).map((ls) => ({
                 value: ls.levelId,
-                label: `${ls.levelName}（${ls.baseScore} 分）`,
+                label: `${ls.levelName}（${ls.baseScore.toFixed(1)} 分）`,
               }));
 
               return (
