@@ -1,9 +1,16 @@
 package com.eval.jxj.service.impl;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.eval.jxj.dto.response.BatchEvaluationTableVO;
 import com.eval.jxj.dto.response.BatchRankingVO;
 import com.eval.jxj.dto.response.BatchStatsVO;
 import com.eval.jxj.dto.response.BatchVO;
+import com.eval.jxj.entity.Award;
+import com.eval.jxj.entity.BatchBasicScore;
+import com.eval.jxj.entity.SysUser;
+import com.eval.jxj.mapper.AwardMapper;
+import com.eval.jxj.mapper.BatchBasicScoreMapper;
+import com.eval.jxj.mapper.SysUserMapper;
 import com.eval.jxj.service.BatchExportService;
 import com.eval.jxj.service.BatchService;
 import org.apache.poi.ss.usermodel.BorderStyle;
@@ -21,31 +28,157 @@ import org.springframework.stereotype.Service;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 @Service
 public class BatchExportServiceImpl implements BatchExportService {
 
     private final BatchService batchService;
+    private final BatchBasicScoreMapper basicScoreMapper;
+    private final AwardMapper awardMapper;
+    private final SysUserMapper userMapper;
 
-    public BatchExportServiceImpl(BatchService batchService) {
+    public BatchExportServiceImpl(BatchService batchService, BatchBasicScoreMapper basicScoreMapper,
+                                  AwardMapper awardMapper, SysUserMapper userMapper) {
         this.batchService = batchService;
+        this.basicScoreMapper = basicScoreMapper;
+        this.awardMapper = awardMapper;
+        this.userMapper = userMapper;
     }
 
     @Override
     public void writeBatchExport(String batchId, OutputStream outputStream) throws IOException {
         BatchVO batch = batchService.getBatch(batchId);
         BatchEvaluationTableVO evaluationTable = batchService.getEvaluationTable(batchId);
+        List<BatchRankingVO> rankings = addBasicOnlyStudents(batch, batchService.getRanking(batchId), evaluationTable);
         try (Workbook workbook = new XSSFWorkbook()) {
             writeStatsSheet(workbook, batchService.getStats(batchId));
-            writeRankingSheet(workbook, batch, batchService.getRanking(batchId), evaluationTable);
+            writeRankingSheet(workbook, batch, rankings, evaluationTable);
             writeEvaluationSheet(workbook, batch, evaluationTable);
             workbook.write(outputStream);
         }
+    }
+
+    private List<BatchRankingVO> addBasicOnlyStudents(BatchVO batch, List<BatchRankingVO> rankings,
+                                                       BatchEvaluationTableVO table) {
+        List<Award> basicAwards = awardMapper.selectBatchBasicAwards(batch.getId());
+        if (basicAwards.isEmpty()) {
+            return rankings;
+        }
+        List<BatchBasicScore> basicScores = basicScoreMapper.selectList(new LambdaQueryWrapper<BatchBasicScore>()
+                .eq(BatchBasicScore::getBatchId, batch.getId()));
+        if (basicScores.isEmpty()) {
+            return rankings;
+        }
+
+        Map<String, Award> awardById = basicAwards.stream()
+                .collect(Collectors.toMap(Award::getId, Function.identity(), (a, b) -> a));
+        Map<String, SysUser> studentById = userMapper.selectStudentsInBatchScope(batch.getId()).stream()
+                .collect(Collectors.toMap(SysUser::getId, Function.identity(), (a, b) -> a));
+        Set<String> approvedStudentIds = rankings.stream()
+                .map(BatchRankingVO::getStudentId).collect(Collectors.toSet());
+        Set<String> candidateIds = basicScores.stream()
+                .filter(score -> score.getScore() != null && score.getScore().signum() != 0)
+                .filter(score -> awardById.containsKey(score.getAwardId()))
+                .map(BatchBasicScore::getStudentId)
+                .filter(studentId -> studentById.containsKey(studentId) && !approvedStudentIds.contains(studentId))
+                .collect(Collectors.toSet());
+        if (candidateIds.isEmpty()) {
+            return rankings;
+        }
+
+        Map<String, BatchEvaluationTableVO.StudentRow> rowsById = new LinkedHashMap<>();
+        Map<String, Map<String, BigDecimal>> rawScoresByStudent = new LinkedHashMap<>();
+        Set<String> visibleCategories = table.getCategories().stream()
+                .map(BatchEvaluationTableVO.CategoryColumn::getCode).collect(Collectors.toSet());
+        Map<String, BigDecimal> capByCategory = batch.getCategories() == null ? Map.of()
+                : batch.getCategories().stream()
+                        .filter(category -> category.getMaxScoreCap() != null)
+                        .collect(Collectors.toMap(BatchVO.CategoryVO::getCategory,
+                                BatchVO.CategoryVO::getMaxScoreCap, (a, b) -> a));
+        for (BatchBasicScore basicScore : basicScores) {
+            String studentId = basicScore.getStudentId();
+            Award award = awardById.get(basicScore.getAwardId());
+            if (!candidateIds.contains(studentId) || award == null) {
+                continue;
+            }
+            BatchEvaluationTableVO.StudentRow row = rowsById.computeIfAbsent(studentId, id -> {
+                SysUser student = studentById.get(id);
+                BatchEvaluationTableVO.StudentRow newRow = new BatchEvaluationTableVO.StudentRow();
+                newRow.setStudentId(id);
+                newRow.setStudentLoginId(student.getLoginId());
+                newRow.setStudentName(student.getName());
+                newRow.setScores(new LinkedHashMap<>());
+                Map<String, BigDecimal> subtotals = new LinkedHashMap<>();
+                visibleCategories.forEach(code -> subtotals.put(code, BigDecimal.ZERO));
+                newRow.setSubtotals(subtotals);
+                return newRow;
+            });
+            BigDecimal score = basicScore.getScore() == null ? BigDecimal.ZERO : basicScore.getScore();
+            row.getScores().merge(award.getId(), score, BigDecimal::add);
+            rawScoresByStudent.computeIfAbsent(studentId, id -> new LinkedHashMap<>())
+                    .merge(award.getCategory(), score, BigDecimal::add);
+            if (visibleCategories.contains(award.getCategory())) {
+                row.getSubtotals().merge(award.getCategory(), score, BigDecimal::add);
+            }
+        }
+
+        List<BatchRankingVO> exportRankings = new ArrayList<>(rankings);
+        for (Map.Entry<String, BatchEvaluationTableVO.StudentRow> entry : rowsById.entrySet()) {
+            String studentId = entry.getKey();
+            Map<String, BigDecimal> rawScores = rawScoresByStudent.get(studentId);
+            Map<String, BigDecimal> categoryScores = new LinkedHashMap<>();
+            BigDecimal total = BigDecimal.ZERO;
+            if (batch.getCategories() != null) {
+                for (BatchVO.CategoryVO category : batch.getCategories()) {
+                    BigDecimal capped = cap(rawScores.getOrDefault(category.getCategory(), BigDecimal.ZERO),
+                            category.getMaxScoreCap());
+                    categoryScores.put(category.getCategory(), capped);
+                    total = total.add(capped.multiply(category.getWeightPercent())
+                            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP));
+                }
+            }
+            BatchEvaluationTableVO.StudentRow studentRow = entry.getValue();
+            BatchRankingVO ranking = new BatchRankingVO();
+            ranking.setStudentId(studentId);
+            ranking.setStudentLoginId(studentRow.getStudentLoginId());
+            ranking.setStudentName(studentRow.getStudentName());
+            ranking.setCategoryScores(categoryScores);
+            ranking.setTotalScore(total);
+            exportRankings.add(ranking);
+
+            for (BatchEvaluationTableVO.CategoryColumn category : table.getCategories()) {
+                String code = category.getCode();
+                studentRow.getSubtotals().put(code,
+                        cap(studentRow.getSubtotals().get(code), capByCategory.get(code)));
+            }
+        }
+        exportRankings.sort(Comparator
+                .comparing(BatchRankingVO::getTotalScore, Comparator.nullsLast(Comparator.reverseOrder()))
+                .thenComparing(BatchRankingVO::getSubmittedAt, Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(BatchRankingVO::getStudentLoginId, Comparator.nullsLast(String::compareTo)));
+        for (int i = 0; i < exportRankings.size(); i++) {
+            exportRankings.get(i).setRank(i + 1);
+        }
+        List<BatchEvaluationTableVO.StudentRow> exportRows = new ArrayList<>(table.getRows());
+        exportRows.addAll(rowsById.values());
+        exportRows.sort(Comparator.comparing(BatchEvaluationTableVO.StudentRow::getStudentLoginId,
+                Comparator.nullsLast(String::compareTo)));
+        table.setRows(exportRows);
+        return exportRankings;
+    }
+
+    private BigDecimal cap(BigDecimal score, BigDecimal limit) {
+        return limit != null && score.compareTo(limit) > 0 ? limit : score;
     }
 
     private void writeStatsSheet(Workbook workbook, BatchStatsVO stats) {

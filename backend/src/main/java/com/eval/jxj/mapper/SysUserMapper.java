@@ -25,4 +25,13 @@ public interface SysUserMapper extends BaseMapper<SysUser> {
             + "    and bc.class_name = u.class_name "
             + "    and (bc.grade = u.grade or (bc.grade is null and u.grade is null)))) ")
     int countStudentsInBatchScope(@Param("batchId") String batchId);
+
+    @Select("select u.* from sys_user u "
+            + "join eval_batch b on b.id = #{batchId} and b.is_deleted = 0 "
+            + "where u.role = 'student' and u.is_deleted = 0 "
+            + "and (b.target_type = 'all' or exists ("
+            + "  select 1 from batch_class bc where bc.batch_id = b.id "
+            + "    and bc.class_name = u.class_name "
+            + "    and (bc.grade = u.grade or (bc.grade is null and u.grade is null)))) ")
+    List<SysUser> selectStudentsInBatchScope(@Param("batchId") String batchId);
 }
