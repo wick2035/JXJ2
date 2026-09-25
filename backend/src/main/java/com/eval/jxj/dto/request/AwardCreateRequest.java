@@ -18,6 +18,7 @@ public class AwardCreateRequest {
     @Data
     public static class LevelScoreItem {
         private String levelId;
+        private String levelName;
         private BigDecimal baseScore;
     }
 }

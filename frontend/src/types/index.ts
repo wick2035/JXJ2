@@ -133,6 +133,14 @@ export interface AwardVO {
   levelScores: LevelScoreVO[];
 }
 
+export interface AwardSaveRequest {
+  name: string;
+  category: string;
+  awardType?: 'normal' | 'basic';
+  description?: string;
+  levelScores?: Array<{ levelId?: string; levelName?: string; baseScore: number }>;
+}
+
 export interface LevelScoreVO {
   id: string;
   levelId: string;

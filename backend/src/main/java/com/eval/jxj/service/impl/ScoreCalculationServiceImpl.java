@@ -59,12 +59,15 @@ public class ScoreCalculationServiceImpl implements ScoreCalculationService {
 
         String targetLevelId = item.getLevelId();
 
-        // Handle downgrade: find the level with sort_order + 1
+        // Only shared levels have a defined downgrade order. Award-specific names are flat options.
         if (item.getUseDowngrade() != null && item.getUseDowngrade() == 1 && targetLevelId != null) {
             AwardLevelDef currentLevel = levelDefMapper.selectById(targetLevelId);
-            if (currentLevel != null) {
+            if (currentLevel != null && currentLevel.getAwardId() != null) {
+                item.setUseDowngrade(0);
+            } else if (currentLevel != null) {
                 AwardLevelDef downgraded = levelDefMapper.selectOne(
                         new LambdaQueryWrapper<AwardLevelDef>()
+                                .isNull(AwardLevelDef::getAwardId)
                                 .eq(AwardLevelDef::getSortOrder, currentLevel.getSortOrder() + 1));
                 if (downgraded != null) {
                     targetLevelId = downgraded.getId();

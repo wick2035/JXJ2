@@ -9,19 +9,27 @@ import com.eval.jxj.entity.AwardCategory;
 import com.eval.jxj.entity.AwardLevelDef;
 import com.eval.jxj.entity.AwardLevelScore;
 import com.eval.jxj.entity.BatchAward;
+import com.eval.jxj.entity.DeclarationItem;
 import com.eval.jxj.mapper.AwardCategoryMapper;
 import com.eval.jxj.mapper.AwardLevelDefMapper;
 import com.eval.jxj.mapper.AwardLevelScoreMapper;
 import com.eval.jxj.mapper.AwardMapper;
 import com.eval.jxj.mapper.BatchAwardMapper;
+import com.eval.jxj.mapper.DeclarationItemMapper;
 import com.eval.jxj.service.AwardService;
 import org.springframework.beans.BeanUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Service
@@ -32,15 +40,17 @@ public class AwardServiceImpl implements AwardService {
     private final AwardLevelDefMapper levelDefMapper;
     private final BatchAwardMapper batchAwardMapper;
     private final AwardCategoryMapper categoryMapper;
+    private final DeclarationItemMapper itemMapper;
 
     public AwardServiceImpl(AwardMapper awardMapper, AwardLevelScoreMapper levelScoreMapper,
                            AwardLevelDefMapper levelDefMapper, BatchAwardMapper batchAwardMapper,
-                           AwardCategoryMapper categoryMapper) {
+                           AwardCategoryMapper categoryMapper, DeclarationItemMapper itemMapper) {
         this.awardMapper = awardMapper;
         this.levelScoreMapper = levelScoreMapper;
         this.levelDefMapper = levelDefMapper;
         this.batchAwardMapper = batchAwardMapper;
         this.categoryMapper = categoryMapper;
+        this.itemMapper = itemMapper;
     }
 
     @Override
@@ -72,7 +82,7 @@ public class AwardServiceImpl implements AwardService {
         awardMapper.insert(award);
 
         if (!"basic".equals(award.getAwardType()) && request.getLevelScores() != null) {
-            saveLevelScores(award.getId(), request.getLevelScores());
+            syncLevelScores(award.getId(), request.getLevelScores());
         }
         return toVO(award);
     }
@@ -91,10 +101,9 @@ public class AwardServiceImpl implements AwardService {
         awardMapper.updateById(award);
 
         if ("basic".equals(award.getAwardType())) {
-            levelScoreMapper.deleteByAwardId(id);
+            syncLevelScores(id, List.of());
         } else if (request.getLevelScores() != null) {
-            levelScoreMapper.deleteByAwardId(id);
-            saveLevelScores(id, request.getLevelScores());
+            syncLevelScores(id, request.getLevelScores());
         }
         return toVO(award);
     }
@@ -107,7 +116,9 @@ public class AwardServiceImpl implements AwardService {
     @Override
     public List<AwardLevelDef> listLevels() {
         return levelDefMapper.selectList(
-                new LambdaQueryWrapper<AwardLevelDef>().orderByAsc(AwardLevelDef::getSortOrder));
+                new LambdaQueryWrapper<AwardLevelDef>()
+                        .isNull(AwardLevelDef::getAwardId)
+                        .orderByAsc(AwardLevelDef::getSortOrder));
     }
 
     @Override
@@ -139,13 +150,112 @@ public class AwardServiceImpl implements AwardService {
         }).collect(Collectors.toList());
     }
 
-    private void saveLevelScores(String awardId, List<AwardCreateRequest.LevelScoreItem> items) {
+    private void syncLevelScores(String awardId, List<AwardCreateRequest.LevelScoreItem> items) {
+        List<AwardLevelDef> shared = listLevels();
+        List<AwardLevelDef> owned = levelDefMapper.selectList(new LambdaQueryWrapper<AwardLevelDef>()
+                .eq(AwardLevelDef::getAwardId, awardId));
+        List<AwardLevelScore> previous = levelScoreMapper.selectList(new LambdaQueryWrapper<AwardLevelScore>()
+                .eq(AwardLevelScore::getAwardId, awardId));
+
+        Map<String, AwardLevelDef> available = new HashMap<>();
+        Set<String> usedNames = new HashSet<>();
+        for (AwardLevelDef level : shared) {
+            available.put(level.getId(), level);
+            usedNames.add(level.getName().trim().toLowerCase(java.util.Locale.ROOT));
+        }
+        for (AwardLevelDef level : owned) available.put(level.getId(), level);
+
+        Set<String> requestedIds = new HashSet<>();
+        List<AwardLevelDef> newLevels = new ArrayList<>();
+        List<AwardLevelDef> changedLevels = new ArrayList<>();
+        List<AwardLevelDef> desiredLevels = new ArrayList<>();
+        int customOrder = 6;
         for (AwardCreateRequest.LevelScoreItem item : items) {
+            BigDecimal value = item.getBaseScore();
+            if (value == null || value.compareTo(BigDecimal.ZERO) <= 0
+                    || value.compareTo(new BigDecimal("999999.99")) > 0 || value.scale() > 2) {
+                throw new BizException("级别分值须大于 0，最多两位小数且不超过 999999.99");
+            }
+
+            AwardLevelDef level;
+            if (StringUtils.hasText(item.getLevelId())) {
+                if (!requestedIds.add(item.getLevelId())) throw new BizException("同一级别不能重复配置");
+                level = available.get(item.getLevelId());
+                if (level == null) throw new BizException("级别不存在或不属于当前奖项");
+                if (level.getAwardId() == null) {
+                    if (StringUtils.hasText(item.getLevelName())
+                            && !level.getName().equals(item.getLevelName().trim())) {
+                        throw new BizException("公共级别名称不能在奖项中修改");
+                    }
+                } else {
+                    String name = validateCustomName(item.getLevelName());
+                    if (!level.getName().equals(name)) {
+                        assertNotReferenced(awardId, level.getId(), "改名");
+                        level.setName(name);
+                    }
+                    level.setSortOrder(customOrder++);
+                    changedLevels.add(level);
+                    if (!usedNames.add(name.toLowerCase(java.util.Locale.ROOT))) {
+                        throw new BizException("级别名称不能与其他级别重复：" + name);
+                    }
+                }
+            } else {
+                String name = validateCustomName(item.getLevelName());
+                if (!usedNames.add(name.toLowerCase(java.util.Locale.ROOT))) {
+                    throw new BizException("级别名称不能与其他级别重复：" + name);
+                }
+                level = new AwardLevelDef();
+                level.setAwardId(awardId);
+                level.setCode("custom_" + UUID.randomUUID().toString().replace("-", ""));
+                level.setName(name);
+                level.setSortOrder(customOrder++);
+                newLevels.add(level);
+            }
+            desiredLevels.add(level);
+        }
+
+        for (AwardLevelScore score : previous) {
+            if (desiredLevels.stream().noneMatch(level -> score.getLevelId().equals(level.getId()))) {
+                assertNotReferenced(awardId, score.getLevelId(), "移除");
+            }
+        }
+        for (AwardLevelDef level : owned) {
+            if (!requestedIds.contains(level.getId())) {
+                assertNotReferenced(awardId, level.getId(), "移除");
+            }
+        }
+
+        levelScoreMapper.deleteByAwardId(awardId);
+        for (AwardLevelDef level : changedLevels) levelDefMapper.updateById(level);
+        for (AwardLevelDef level : newLevels) levelDefMapper.insert(level);
+        for (int i = 0; i < desiredLevels.size(); i++) {
             AwardLevelScore score = new AwardLevelScore();
             score.setAwardId(awardId);
-            score.setLevelId(item.getLevelId());
-            score.setBaseScore(item.getBaseScore());
+            score.setLevelId(desiredLevels.get(i).getId());
+            score.setBaseScore(items.get(i).getBaseScore());
             levelScoreMapper.insert(score);
+        }
+        for (AwardLevelDef level : owned) {
+            if (!requestedIds.contains(level.getId())) levelDefMapper.deleteById(level.getId());
+        }
+    }
+
+    private String validateCustomName(String value) {
+        if (!StringUtils.hasText(value)) throw new BizException("请输入自定义级别名称");
+        String name = value.trim();
+        if (name.length() > 100) throw new BizException("级别名称不能超过 100 个字符");
+        return name;
+    }
+
+    private void assertNotReferenced(String awardId, String levelId, String action) {
+        Long declarations = itemMapper.selectCount(new LambdaQueryWrapper<DeclarationItem>()
+                .eq(DeclarationItem::getAwardId, awardId)
+                .eq(DeclarationItem::getLevelId, levelId));
+        Long batches = batchAwardMapper.selectCount(new LambdaQueryWrapper<BatchAward>()
+                .eq(BatchAward::getAwardId, awardId)
+                .eq(BatchAward::getLevelId, levelId));
+        if ((declarations != null && declarations > 0) || (batches != null && batches > 0)) {
+            throw new BizException("级别已被申报或批次分值配置使用，不能" + action);
         }
     }
 
@@ -154,7 +264,10 @@ public class AwardServiceImpl implements AwardService {
         BeanUtils.copyProperties(award, vo);
 
         List<AwardLevelDef> levels = levelDefMapper.selectList(
-                new LambdaQueryWrapper<AwardLevelDef>().orderByAsc(AwardLevelDef::getSortOrder));
+                new LambdaQueryWrapper<AwardLevelDef>()
+                        .and(query -> query.isNull(AwardLevelDef::getAwardId)
+                                .or().eq(AwardLevelDef::getAwardId, award.getId()))
+                        .orderByAsc(AwardLevelDef::getSortOrder));
         Map<String, AwardLevelDef> levelMap = levels.stream()
                 .collect(Collectors.toMap(AwardLevelDef::getId, l -> l));
 

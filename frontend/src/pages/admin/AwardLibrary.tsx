@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
+import { isAxiosError } from 'axios';
 import {
   App,
   Button,
@@ -30,7 +31,35 @@ import { createCategory, deleteCategory, updateCategory } from '../../api/catego
 import { useCategories } from '../../hooks/useCategories';
 import type { AwardLevelDef, AwardVO, CategoryMeta } from '../../types';
 
-type ScoreMatrixItem = { levelId: string; baseScore: number };
+type ScoreMatrixItem = {
+  key: string;
+  levelId?: string;
+  levelName?: string;
+  baseScore: number;
+  custom: boolean;
+};
+
+const presetRows = (levels: AwardLevelDef[], award?: AwardVO): ScoreMatrixItem[] =>
+  levels.map((level) => ({
+    key: level.id,
+    levelId: level.id,
+    baseScore: award?.levelScores.find((score) => score.levelId === level.id)?.baseScore ?? 0,
+    custom: false,
+  }));
+
+const customRows = (award: AwardVO, levels: AwardLevelDef[], clone: boolean): ScoreMatrixItem[] =>
+  award.levelScores
+    .filter((score) => !levels.some((level) => level.id === score.levelId))
+    .map((score) => ({
+      key: clone ? crypto.randomUUID() : score.levelId,
+      levelId: clone ? undefined : score.levelId,
+      levelName: score.levelName,
+      baseScore: score.baseScore,
+      custom: true,
+    }));
+
+const requestErrorMessage = (error: unknown, fallback: string): string =>
+  isAxiosError<{ message?: string }>(error) ? error.response?.data?.message || fallback : fallback;
 
 const AwardLibrary: React.FC = () => {
   const { message, modal } = App.useApp();
@@ -43,6 +72,7 @@ const AwardLibrary: React.FC = () => {
   const [editingCategory, setEditingCategory] = useState<CategoryMeta | null>(null);
   const [scoreMatrix, setScoreMatrix] = useState<ScoreMatrixItem[]>([]);
   const [reuseAwardId, setReuseAwardId] = useState<string>();
+  const [awardSaving, setAwardSaving] = useState(false);
   const [awardForm] = Form.useForm();
   const [categoryForm] = Form.useForm();
   const awardTypeWatch = Form.useWatch('awardType', awardForm) || 'normal';
@@ -94,7 +124,7 @@ const AwardLibrary: React.FC = () => {
       category: selectedCat || categories[0]?.code,
       awardType: 'normal',
     });
-    setScoreMatrix(levels.map((level) => ({ levelId: level.id, baseScore: 0 })));
+    setScoreMatrix(presetRows(levels));
     setAwardModalOpen(true);
   };
 
@@ -107,10 +137,7 @@ const AwardLibrary: React.FC = () => {
       awardType: award.awardType || 'normal',
       description: award.description,
     });
-    setScoreMatrix(levels.map((level) => {
-      const existing = award.levelScores?.find((score) => score.levelId === level.id);
-      return { levelId: level.id, baseScore: existing?.baseScore || 0 };
-    }));
+    setScoreMatrix([...presetRows(levels, award), ...customRows(award, levels, false)]);
     setAwardModalOpen(true);
   };
 
@@ -133,22 +160,45 @@ const AwardLibrary: React.FC = () => {
   const handleReuseAwardChange = (awardId?: string) => {
     setReuseAwardId(awardId);
     const template = awards.find((award) => award.id === awardId);
-    if (!template) return;
-    setScoreMatrix(levels.map((level) => {
-      const existing = template.levelScores?.find((score) => score.levelId === level.id);
-      return { levelId: level.id, baseScore: existing?.baseScore || 0 };
-    }));
+    setScoreMatrix(template
+      ? [...presetRows(levels, template), ...customRows(template, levels, true)]
+      : presetRows(levels));
   };
 
   const handleSaveAward = async () => {
-    const values = await awardForm.validateFields();
-    const awardType = values.awardType || 'normal';
-    const payload = {
-      ...values,
-      awardType,
-      levelScores: awardType === 'basic' ? [] : scoreMatrix.filter((score) => score.baseScore > 0),
-    };
     try {
+      const values = await awardForm.validateFields();
+      const awardType = values.awardType || 'normal';
+      if (awardType !== 'basic') {
+        const seen = new Set(levels.map((level) => level.name.trim().toLocaleLowerCase()));
+        for (const score of scoreMatrix) {
+          if (!Number.isFinite(score.baseScore) || score.baseScore < 0 || score.baseScore > 999999.99
+            || Math.abs(score.baseScore * 100 - Math.round(score.baseScore * 100)) > 1e-6) {
+            message.error('级别分值须在 0 到 999999.99 之间，最多两位小数');
+            return;
+          }
+          if (!score.custom) continue;
+          const name = score.levelName?.trim() || '';
+          if (!name || name.length > 100 || score.baseScore <= 0) {
+            message.error('自定义级别须填写名称及大于 0 的分值，名称不超过 100 字');
+            return;
+          }
+          const key = name.toLocaleLowerCase();
+          if (seen.has(key)) {
+            message.error(`级别名称重复：${name}`);
+            return;
+          }
+          seen.add(key);
+        }
+      }
+      const payload = {
+        ...values,
+        awardType,
+        levelScores: awardType === 'basic' ? [] : scoreMatrix
+          .filter((score) => score.baseScore > 0)
+          .map(({ levelId, levelName, baseScore }) => ({ levelId, levelName, baseScore })),
+      };
+      setAwardSaving(true);
       if (editingAward) {
         await updateAward(editingAward.id, payload);
         message.success('奖项已更新');
@@ -157,9 +207,13 @@ const AwardLibrary: React.FC = () => {
         message.success('奖项已创建');
       }
       setAwardModalOpen(false);
-      loadAwards();
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '操作失败');
+      await loadAwards();
+    } catch (error: unknown) {
+      if (!(typeof error === 'object' && error !== null && 'errorFields' in error)) {
+        message.error(requestErrorMessage(error, '操作失败'));
+      }
+    } finally {
+      setAwardSaving(false);
     }
   };
 
@@ -181,8 +235,8 @@ const AwardLibrary: React.FC = () => {
       }
       setCategoryModalOpen(false);
       await loadCategories();
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '类别保存失败');
+    } catch (error: unknown) {
+      message.error(requestErrorMessage(error, '类别保存失败'));
     }
   };
 
@@ -194,8 +248,8 @@ const AwardLibrary: React.FC = () => {
       if (selectedCat === category.code) {
         setSelectedCat(undefined);
       }
-    } catch (e: any) {
-      message.error(e.response?.data?.message || '类别删除失败');
+    } catch (error: unknown) {
+      message.error(requestErrorMessage(error, '类别删除失败'));
     }
   };
 
@@ -345,6 +399,7 @@ const AwardLibrary: React.FC = () => {
         open={awardModalOpen}
         onCancel={() => setAwardModalOpen(false)}
         onOk={handleSaveAward}
+        confirmLoading={awardSaving}
         width={760}
       >
         <Form form={awardForm} layout="vertical" style={{ marginTop: 16 }}>
@@ -390,33 +445,84 @@ const AwardLibrary: React.FC = () => {
         ) : (
           <>
             <Divider />
-            <Typography.Text strong>级别-分值配置</Typography.Text>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+              <div>
+                <Typography.Text strong>级别与分值</Typography.Text>
+                <div><Typography.Text type="secondary">只有分值大于 0 的级别会提供给学生选择。</Typography.Text></div>
+              </div>
+              <Space wrap>
+                <Select
+                  value={undefined}
+                  style={{ width: 150 }}
+                  placeholder="添加默认级别"
+                  options={levels
+                    .filter((level) => !scoreMatrix.some((score) => score.levelId === level.id))
+                    .map((level) => ({ value: level.id, label: level.name }))}
+                  disabled={levels.every((level) => scoreMatrix.some((score) => score.levelId === level.id))}
+                  onChange={(id: string) => setScoreMatrix((prev) => [
+                    ...prev,
+                    { key: id, levelId: id, baseScore: 0, custom: false },
+                  ])}
+                />
+                <Button icon={<PlusOutlined />} onClick={() => setScoreMatrix((prev) => [
+                  ...prev,
+                  { key: crypto.randomUUID(), levelName: '', baseScore: 0, custom: true },
+                ])}>
+                  添加自定义级别
+                </Button>
+              </Space>
+            </div>
             <Table
               size="small"
               bordered
               pagination={false}
               style={{ marginTop: 12 }}
               dataSource={scoreMatrix}
-              rowKey="levelId"
+              rowKey="key"
               columns={[
                 {
                   title: '级别',
-                  dataIndex: 'levelId',
-                  render: (id: string) => levels.find((level) => level.id === id)?.name || id,
+                  dataIndex: 'levelName',
+                  render: (_: string, record: ScoreMatrixItem) => record.custom ? (
+                    <Input
+                      value={record.levelName}
+                      maxLength={100}
+                      placeholder="如：国家级一等奖"
+                      onChange={(event) => setScoreMatrix((prev) => prev.map((score) => (
+                        score.key === record.key ? { ...score, levelName: event.target.value } : score
+                      )))}
+                    />
+                  ) : levels.find((level) => level.id === record.levelId)?.name || record.levelId,
                 },
                 {
                   title: '基础分值',
                   dataIndex: 'baseScore',
-                  render: (_: number, record: ScoreMatrixItem, idx: number) => (
+                  width: 165,
+                  render: (_: number, record: ScoreMatrixItem) => (
                     <InputNumber
                       min={0}
+                      max={999999.99}
                       step={0.5}
+                      precision={2}
                       value={record.baseScore}
                       onChange={(value) => {
-                        setScoreMatrix((prev) => prev.map((score, index) => (
-                          index === idx ? { ...score, baseScore: value || 0 } : score
+                        setScoreMatrix((prev) => prev.map((score) => (
+                          score.key === record.key ? { ...score, baseScore: value || 0 } : score
                         )));
                       }}
+                    />
+                  ),
+                },
+                {
+                  title: '操作',
+                  width: 70,
+                  render: (_: unknown, record: ScoreMatrixItem) => (
+                    <Button
+                      type="text"
+                      danger
+                      aria-label={`移除${record.custom ? record.levelName || '自定义级别' : levels.find((level) => level.id === record.levelId)?.name || '级别'}`}
+                      icon={<DeleteOutlined />}
+                      onClick={() => setScoreMatrix((prev) => prev.filter((score) => score.key !== record.key))}
                     />
                   ),
                 },

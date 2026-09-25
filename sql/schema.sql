@@ -120,14 +120,15 @@ CREATE TABLE `award_category` (
 
 CREATE TABLE `award_level_def` (
   `id`          CHAR(36)     NOT NULL,
-  `code`        VARCHAR(50)  NOT NULL COMMENT 'national/provincial/municipal/school/college',
-  `name`        VARCHAR(100) NOT NULL COMMENT '国家级/省级/市级/校级/院级',
-  `sort_order`  INT          NOT NULL COMMENT '层级排序:1=最高',
+  `code`        VARCHAR(50)  NOT NULL COMMENT '公共级别编码或自动生成的自定义编码',
+  `name`        VARCHAR(100) NOT NULL COMMENT '级别显示名称',
+  `award_id`    CHAR(36)     NULL COMMENT 'NULL=公共级别，否则仅属于指定奖项',
+  `sort_order`  INT          NOT NULL COMMENT '公共级别1-5，自定义级别从6开始',
   `is_deleted`  TINYINT(1)   NOT NULL DEFAULT 0,
   `created_at`  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_code` (`code`),
-  UNIQUE KEY `uk_sort_order` (`sort_order`)
+  KEY `idx_award_level_order` (`award_id`, `sort_order`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='奖项级别定义表';
 
 CREATE TABLE `award` (
@@ -142,6 +143,9 @@ CREATE TABLE `award` (
   PRIMARY KEY (`id`),
   KEY `idx_category` (`category`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='奖项主表';
+
+ALTER TABLE `award_level_def`
+  ADD CONSTRAINT `fk_ald_award` FOREIGN KEY (`award_id`) REFERENCES `award`(`id`);
 
 CREATE TABLE `award_level_score` (
   `id`          CHAR(36)    NOT NULL,

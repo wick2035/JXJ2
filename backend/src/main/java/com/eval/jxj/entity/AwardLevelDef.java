@@ -11,6 +11,7 @@ public class AwardLevelDef {
     private String id;
     private String code;
     private String name;
+    private String awardId;
     private Integer sortOrder;
     @TableLogic
     private Integer isDeleted;

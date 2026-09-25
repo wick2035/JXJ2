@@ -1,14 +1,14 @@
 import client from './client';
-import type { Result, AwardVO, AwardLevelDef } from '../types';
+import type { Result, AwardVO, AwardLevelDef, AwardSaveRequest } from '../types';
 
 export const getAwards = (category?: string) =>
   client.get<Result<AwardVO[]>>('/api/awards', { params: { category } });
 
 export const getAward = (id: string) => client.get<Result<AwardVO>>(`/api/awards/${id}`);
 
-export const createAward = (data: any) => client.post<Result<AwardVO>>('/api/awards', data);
+export const createAward = (data: AwardSaveRequest) => client.post<Result<AwardVO>>('/api/awards', data);
 
-export const updateAward = (id: string, data: any) => client.put<Result<AwardVO>>(`/api/awards/${id}`, data);
+export const updateAward = (id: string, data: AwardSaveRequest) => client.put<Result<AwardVO>>(`/api/awards/${id}`, data);
 
 export const deleteAward = (id: string) => client.delete<Result<void>>(`/api/awards/${id}`);
 
